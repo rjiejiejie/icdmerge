@@ -1,0 +1,202 @@
+---
+title: "icdmerge: Quickstart (Toy Example)"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{icdmerge: Quickstart (Toy Example)}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.width = 7,
+  fig.height = 4
+)
+```
+## What this package does
+
+icdmerge merges fine-grained ICD diagnosis nodes into clinically interpretable merged nodes under a clinical constraint:
+
+- Each disease is represented by a global structural profile (co-occurrence profile against all diseases).
+
+- Clustering and merging are done within each block only (clinical interpretability).
+
+- The package selects a block-specific number of clusters K* using consensus k-means and PAC.
+
+This vignette demonstrates the workflow using a toy dataset with explicit comorbidity structure so that merging is likely to happen.
+
+## Generate a toy dataset with comorbidity structure
+
+The toy generator below creates:
+
+- 3 blocks (Block_A, Block_B, Block_C)
+
+- Each block has 8 diseases (total 24 diseases)
+
+- Within each block, diseases form two latent subgroups with stronger within-group comorbidity
+
+- A global comorbidity factor introduces network-wide co-occurrence patterns (global roles)
+
+```{r toy_generator}
+library(data.table)
+
+simulate_icdmerge_toy <- function(
+  n_patients = 800,
+  blocks = c("Block_A", "Block_B", "Block_C"),
+  diseases_per_block = 8,
+  seed = 1
+) {
+  set.seed(seed)
+
+  # disease IDs and block mapping
+  disease_ids <- unlist(lapply(seq_along(blocks), function(i) {
+    sprintf("D%s_%02d", LETTERS[i], 1:diseases_per_block)
+  }))
+  block_vec <- rep(blocks, each = diseases_per_block)
+
+  # latent factors per patient
+  g  <- rnorm(n_patients)  # global comorbidity tendency
+  bA <- rnorm(n_patients)  # block-level tendencies
+  bB <- rnorm(n_patients)
+  bC <- rnorm(n_patients)
+
+  # subgroup tendencies within each block (2 subgroups)
+  sA1 <- rnorm(n_patients); sA2 <- rnorm(n_patients)
+  sB1 <- rnorm(n_patients); sB2 <- rnorm(n_patients)
+  sC1 <- rnorm(n_patients); sC2 <- rnorm(n_patients)
+
+  # helper to get block factor by name
+  block_factor <- function(blk) {
+    if (blk == "Block_A") return(bA)
+    if (blk == "Block_B") return(bB)
+    bC
+  }
+
+  # baseline prevalence around ~5%-25% depending on disease
+  base <- runif(length(disease_ids), min = -2.8, max = -1.2)
+
+  # weights: tune these to make co-morbidity/merging likely
+  w_global <- 0.9
+  w_block  <- 1.2
+  w_sub    <- 2.0  # ↑ slightly stronger within-subgroup comorbidity to increase merge probability
+
+  # assign subgroup within each block: first half subgroup1, second half subgroup2
+  stopifnot(diseases_per_block %% 2 == 0)
+  subgroup <- rep(rep(c(1, 2), each = diseases_per_block / 2), times = length(blocks))
+
+  # mild cross-block "role" signal
+  role_shift <- rep(0, length(disease_ids))
+  role_shift[block_vec == "Block_A" & subgroup == 1] <- 0.20
+  role_shift[block_vec == "Block_B" & subgroup == 1] <- 0.10
+  role_shift[block_vec == "Block_C" & subgroup == 2] <- 0.15
+
+  # generate diagnoses then convert to long form
+  eid <- sprintf("P%04d", 1:n_patients)
+  out_list <- vector("list", length(disease_ids))
+
+  for (j in seq_along(disease_ids)) {
+    blk <- block_vec[j]
+    bf  <- block_factor(blk)
+
+    # subgroup factor by block and subgroup
+    sf <- switch(
+      blk,
+      Block_A = if (subgroup[j] == 1) sA1 else sA2,
+      Block_B = if (subgroup[j] == 1) sB1 else sB2,
+      Block_C = if (subgroup[j] == 1) sC1 else sC2
+    )
+
+    # linear predictor -> probability via logistic
+    eta <- base[j] + w_global * g + w_block * bf + w_sub * sf + role_shift[j]
+    p <- 1 / (1 + exp(-eta))
+
+    y <- rbinom(n_patients, size = 1, prob = p)
+
+    if (sum(y) > 0) {
+      out_list[[j]] <- data.table(
+        eid = eid[y == 1],
+        Category_No = disease_ids[j]
+      )
+    } else {
+      out_list[[j]] <- NULL
+    }
+  }
+
+  raw_data <- rbindlist(out_list, use.names = TRUE, fill = TRUE)
+  raw_data <- unique(raw_data)
+
+  codebook <- data.table(
+    No = disease_ids,
+    block = block_vec,
+    Codes = disease_ids,
+    Names = paste("Toy disease", disease_ids)
+  )
+
+  # Frequency = number of unique patients with the disease
+  freq_dt <- unique(raw_data)[, .(Frequency = uniqueN(eid)), by = Category_No]
+  codebook <- merge(codebook, freq_dt, by.x = "No", by.y = "Category_No", all.x = TRUE)
+  codebook[is.na(Frequency), Frequency := 0L]
+
+  list(raw_data = raw_data, codebook = codebook)
+}
+
+toy <- simulate_icdmerge_toy()
+
+# Avoid printing huge tables in the vignette
+head(toy$raw_data)
+head(toy$codebook)
+```
+
+A quick look at disease frequencies:
+```{r}
+toy$codebook[, summary(Frequency)]
+toy$codebook[, .(n_diseases = .N, minF = min(Frequency), maxF = max(Frequency)), by = block]
+
+```
+
+## Run icdmerge on the toy data
+
+We keep parameters small so the vignette runs fast, but large enough to demonstrate merges.
+
+```{r run_icdmerge}
+library(icdmerge)
+
+res <- run_block_merge(
+  raw_data = toy$raw_data,
+  codebook  = toy$codebook,
+  prevalence_cutoff = 0.01,   # toy data: keep common diseases
+  n_resamples = 60,           # keep moderate; should finish quickly
+  k_max_per_block = 6,
+  write_files = FALSE,
+  verbose = TRUE
+)
+
+print(res)
+```
+
+## Inspect selected K* and merge results
+```{r}
+#Block-wise K* distribution
+kstar <- res$kstar
+kstar[, .N, by = K_star][order(K_star)]
+kstar[order(-n_nodes)][1:10]
+
+#How many merges happened?
+res$lineage[Member_Count > 1, .N]
+res$lineage[Member_Count > 1][order(-Member_Count)][1:10, .(Current_ID, Block, Member_Count)]
+
+#Merged map
+head(res$update_map)
+
+```
+
+## Notes and tips
+
+- If your toy run produces no merges, increase comorbidity strength by raising w_sub in the generator (e.g., from 1.8 to 2.2), or increase n_resamples.
+- For real data, the recommended workflow is:
+  1. Ensure your raw_data and codebook meet the required column names
+  2. Run run_block_merge() with a stable prevalence_cutoff
+  3. Review PAC_Summary_Kstar.csv (or res$kstar) to understand block-wise granularity
+  4. Use the merge dictionary (Final_Merged_Dict.csv) to preserve interpretability

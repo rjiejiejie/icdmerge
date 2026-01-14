@@ -1,0 +1,20 @@
+Package: icdmerge
+Title: ICD Node Merging via Block-wise Consensus K-means and PAC
+Version: 0.1.0
+Authors@R: 
+    person("Shui-Kit", "Cheuk", email = "2311210077@bjmu.edu.cn", role = c("aut", "cre"))
+Description: Tools for merging fine-grained ICD diagnosis nodes into clinically interpretable merged nodes using block-wise consensus k-means clustering, PAC-based K selection, and an optional homogeneity gate.
+License: MIT + file LICENSE
+Encoding: UTF-8
+LazyData: true
+Imports:
+    data.table,
+    Matrix
+Suggests:
+    testthat (>= 3.0.0),
+    knitr,
+    rmarkdown
+Config/testthat/edition: 3
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.3
+VignetteBuilder: knitr
