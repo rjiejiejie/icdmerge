@@ -1,6 +1,6 @@
 Package: icdmerge
 Title: ICD Node Merging via Block-wise Consensus K-means and PAC
-Version: 0.1.0
+Version: 0.1.1
 Authors@R: 
     person("Shui-Kit", "Cheuk", email = "2311210077@bjmu.edu.cn", role = c("aut", "cre"))
 Description: Tools for merging fine-grained ICD diagnosis nodes into clinically interpretable merged nodes using block-wise consensus k-means clustering, PAC-based K selection, and an optional homogeneity gate.
